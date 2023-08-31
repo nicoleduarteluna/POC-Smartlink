@@ -1,0 +1,255 @@
+#include "protheus.ch"
+
+/*/{Protheus.doc} TotvsLinkClientCopy
+Realiza a comunicação com o TotvsLink.
+
+@type class
+@author izac.ciszevski
+@obs  Esta funcionalidade tem dependencia com o produto techfin e é necessário ter instalado e configurado.
+TFConfiguration:GetRACToken()
+FwTotvsAppsRegistry():GetServiceURL()
+
+/*/
+Class TotvsLinkClientCopy From LongNameClass
+
+    Data oClient As Object
+    Data oMessage As Object
+
+    Public Method New()
+    Public Method SetRestClient()
+    Private Method PostRequest()
+    Private Method GetRequest()
+
+    Public Method Setup()
+    Public Method Receive()
+    Public Method GetMessage()
+    Public Method Success() // Ack
+    Public Method Fail()    // Requeue
+    Public Method Send()
+    Public Method SendAudience()
+    Public Method GetError()
+    Public Method GetRestMessage()
+
+EndClass
+
+/*/{Protheus.doc} TotvsLinkClientCopy::New
+Construtor. Realiza o setup da fila.
+
+@type method
+@author izac.ciszevski
+/*/
+Method New() Class TotvsLinkClientCopy
+	self:SetRestClient()
+    self:Setup()
+Return
+
+/*/{Protheus.doc} TotvsLinkClientCopy::SetRestClient
+Seta o Client Rest.
+
+@type method
+@author izac.ciszevski
+@param oClient, object, objeto para comunicação Rest.
+@obs Facilita o uso de mocks em testes automatizados.
+/*/
+Method SetRestClient( oClient ) Class TotvsLinkClientCopy
+	Default oClient := FwRest():New()
+	self:oClient := oClient
+Return
+
+/*/{Protheus.doc} TotvsLinkClientCopy::GetError
+Retorna o erro da ultima requisição ao SmartLink
+
+@type method
+@return cResult - Erro da ultima requisição.
+@author jandir.silva
+/*/
+Method GetError() Class TotvsLinkClientCopy
+Local cResult as character 
+
+    cResult := self:oClient:GetLastError()
+
+Return cResult
+
+/*/{Protheus.doc} TotvsLinkClientCopy::Setup
+Faz o setup da fila do Totvs link.
+
+@type method
+@author izac.ciszevski
+/*/
+Method Setup() Class TotvsLinkClientCopy
+    Local cEndPoint As Character
+    Local lSuccess As Logical
+
+    cEndPoint := FwTotvsAppsRegistry():GetServiceURL( "link-setup" )
+
+    //TODO Adicionar a chamada da api que confere quais produtos tem disponíveis no tenant.
+    //Deve ser convencionado o nome do tipo(fila) criado para esse produto.
+    //Com isso conseguiríamos conferir se as classes de leitura desse produto ( tipo + MessageReader)
+    //e somente subscrever no que realmente conseguimos processar.
+
+    lSuccess := self:GetRequest(cEndPoint)
+    If !lSuccess
+        lSuccess := self:PostRequest( cEndPoint, '{"subscriptions":["all-messages"]}' )
+    EndIf
+
+Return lSuccess
+
+/*/{Protheus.doc} TotvsLinkClientCopy::Receive
+Verifica se existem mensagens no TotvsLink.
+@type method
+@author izac.ciszevski
+@return logical, verdadeiro se retornou uma mensagem não vazia
+/*/
+Method Receive() Class TotvsLinkClientCopy
+    Local cMessage As Character
+    Local cEndPoint As Character
+    Local lSuccess As Logical
+
+    // cEndPoint := FwTotvsAppsRegistry():GetServiceURL( "link-long-polling" )
+    cEndPoint := FwTotvsAppsRegistry():GetServiceURL( "link-get" )
+    cMessage  := ""
+
+    lSuccess := self:GetRequest( cEndPoint )
+
+    If lSuccess
+        cMessage := self:oClient:GetResult()
+    EndIf
+
+    self:oMessage := FwTotvsLinkMessage():New( cMessage )
+
+    lSuccess := lSuccess .And. !Empty( cMessage )
+
+Return lSuccess
+
+/*/{Protheus.doc} TotvsLinkClientCopy::GetMessage
+Recupera a última mensagem carregada no objeto.
+@type method
+@author izac.ciszevski
+@return object, instância de FwTotvsLinkMessage
+/*/
+Method GetMessage() Class TotvsLinkClientCopy
+
+Return self:oMessage
+
+Method GetRestMessage() Class TotvsLinkClientCopy
+Return self:oClient:GetResult()
+
+/*/{Protheus.doc} TotvsLinkClientCopy::Fail
+Notifica que a última mensagem recebida não foi processada com sucesso
+@type method
+@author izac.ciszevski
+@return logical, sucesso ou falha no envio
+/*/
+Method Fail() Class TotvsLinkClientCopy
+    Local cEndPoint As Character
+    Local lSuccess As Logical
+
+    cEndPoint := FwTotvsAppsRegistry():GetServiceURL( "link-requeue" )
+    lSuccess := self:PostRequest( cEndPoint )
+Return lSuccess
+
+/*/{Protheus.doc} TotvsLinkClientCopy::Success
+Notifica que a última mensagem recebida foi processada com sucesso
+@type method
+@author izac.ciszevski
+@return logical, sucesso ou falha no envio
+/*/
+Method Success() Class TotvsLinkClientCopy
+    Local cEndPoint As Character
+    Local lSuccess As Logical
+
+    cEndPoint := FwTotvsAppsRegistry():GetServiceURL( "link-ack" )
+    lSuccess := self:PostRequest( cEndPoint )
+
+Return lSuccess
+
+/*/{Protheus.doc} TotvsLinkClientCopy::Send
+Envia uma mensagem para a fila do TotvsLink
+@type method
+@author izac.ciszevski
+@param cType, character, Tipo da mensagem
+@param cMessage, character, Corpo da requisição
+@return logical, sucesso ou falha no envio
+/*/
+Method Send(cType, cMessage) Class TotvsLinkClientCopy
+    Local cEndPoint As Character
+    Local lSuccess As Logical
+
+    cEndPoint := FwTotvsAppsRegistry():GetServiceURL( "link-send" )
+    cEndPoint := StrTran(cEndPoint, "{type}", cType )
+    lSuccess := self:PostRequest( cEndPoint, cMessage )
+
+Return lSuccess
+
+/*/{Protheus.doc} TotvsLinkClientCopy::SendAudience
+Envia uma mensagem para a fila do TotvsLink usando audiência
+@type method
+@author izac.ciszevski
+@param cType, character, Tipo da mensagem
+@param cAudience, character, Audiência da mensagem
+@param cMessage, character, Corpo da requisição
+@return logical, sucesso ou falha no envio
+/*/
+Method SendAudience(cType, cAudience, cMessage) Class TotvsLinkClientCopy
+    Local cEndPoint As Character
+    Local lSuccess As Logical
+
+    cEndPoint := FwTotvsAppsRegistry():GetServiceURL( "link-send-audience" )
+    cEndPoint := StrTran(cEndPoint, "{type}", cType )
+    cEndPoint := StrTran(cEndPoint, "{audience}", cAudience )
+    lSuccess := self:PostRequest( cEndPoint, cMessage )
+
+Return lSuccess
+
+/*/{Protheus.doc} TotvsLinkClientCopy::PostRequest
+Executa um POST com os argumentos passados
+@type method
+@author izac.ciszevski
+@param cEndPoint, character, endereço para o POST
+@param cPostParam, character, Corpo da requisição
+@return logical, sucesso ou falha no envio
+/*/
+Method PostRequest( cEndPoint, cPostParam ) Class TotvsLinkClientCopy
+    Local lSuccess As Logical
+
+    Default cPostParam := ""
+
+    self:oClient:SetHost("")
+    self:oClient:SetPath( cEndPoint )
+    self:oClient:SetPostParams( cPostParam )
+
+    lSuccess := self:oClient:Post( RetHeader() )
+
+Return lSuccess
+
+/*/{Protheus.doc} TotvsLinkClientCopy::GetRequest
+Executa um GET com os argumentos passados
+@type method
+@author izac.ciszevski
+@param cEndPoint, character, endereço para o GET
+@return logical, sucesso ou falha no envio
+/*/
+Method GetRequest( cEndPoint ) Class TotvsLinkClientCopy
+    Local lSuccess As Logical
+
+    self:oClient:SetHost("")
+    self:oClient:SetPath( cEndPoint )
+    lSuccess := self:oClient:Get( RetHeader() )
+
+Return lSuccess
+
+/*/{Protheus.doc} RetHeader
+Retorna o Header padrão para a requisição com User-Agent e Bearer Token
+@type function
+@author izac.ciszevski
+@return array, header para requisição HTTP
+/*/
+Static Function RetHeader()
+    Local aHeader as Array
+
+    aHeader := {}
+    AAdd( aHeader, "Content-Type: application/json" )
+    AAdd( aHeader, "User-Agent: Protheus " + GetBuild() )
+    AAdd( aHeader, "Authorization: Bearer " + FwTotvsAppsConfiguration():getRACToken() )
+    //conout(aHeader[3])
+Return aHeader

@@ -1,0 +1,228 @@
+#INCLUDE 'protheus.ch'
+#INCLUDE 'restful.ch'
+
+class PLSBSWReqSmtLnk from CenRequest 
+
+    Public Method new()
+    Public Method valida()
+    Public Method getUserLogin(msg)    
+    Public Method requestQueue()    
+    Public Method responseQueue()    
+    Public Method sendMsg(oCfgSmtLnk, oFila, lRequest, oJContent)
+    Public Method getResponse()
+    
+endClass
+
+Method New(oRest) class PLSBSWReqSmtLnk
+    _Super:new(oRest)
+Return self
+
+Method valida() class PLSBSWReqSmtLnk
+     self:lSuccess := _Super:checkBody()
+Return self:lSuccess
+
+Method requestQueue() class PLSBSWReqSmtLnk
+	Local oCfgSmtLnk := CfgSmtLnk():new()
+	Local oFilaReq := TotvsLinkClientCopy():New()
+
+	oConfig := FWTFConfig()
+	oCfgSmtLnk:setCfgRequest()
+    oCfgSmtLnk:newTokenRac()
+
+    oJContent := JsonObject():New()
+	oJContent["login"] := self:jRequest['login']
+	oJContent["password"] := self:jRequest['password']
+
+    if self:lSuccess := self:sendMsg(oCfgSmtLnk, oFilaReq, .T., oJContent)
+        self:responseQueue()
+        oCfgSmtLnk:setCfgRequest()
+        oCfgSmtLnk:newTokenRac()
+        oFilaReq:success()
+    else
+        self:lSuccess       := .F.
+        self:nFault         := 400
+        self:cFaultDesc     := "Não foi possível incluir a mensagem na fila. Tente novamente!"
+    endif 
+
+    oFilaReq:success()
+
+Return self:lSuccess
+
+Method responseQueue() class PLSBSWReqSmtLnk
+	Local oCfgSmtLnk := CfgSmtLnk():new()
+	Local oFilaResp := TotvsLinkClientCopy():New()
+	Local lHasMessage  := .F.
+	Local oMessage := nil
+
+	oConfig := FWTFConfig()
+
+	oCfgSmtLnk:setCfgResp()
+    oCfgSmtLnk:newTokenRac()
+
+	if lHasMessage := oFilaResp:Receive()
+		oMessage := oFilaResp:getMessage()
+		oHeader := oMessage:header()
+		oContent := oMessage:content()
+
+        self:getUserLogin(oContent)
+
+        if self:lSuccess
+            oJContent := JsonObject():New()
+            oJContent["authorized"] := .T. 
+            if oFilaResp:success() //mensagem retirada da fila e sera enviada mensagem de resposta agora
+		    	self:lSuccess := self:sendMsg(oCfgSmtLnk,oFilaResp, .F., oJContent)
+		    endif
+		    if !self:lSuccess //mensagem de resposta falhou e retornou para a fila
+		    	oFilaResp:fail()
+            else 
+                self:getResponse()
+                oCfgSmtLnk:setCfgResp()
+                oCfgSmtLnk:newTokenRac()
+                oFilaResp:success()
+		    endif
+        else 
+            oFilaResp:success()
+        endif
+	endif
+
+Return
+
+Method sendMsg(oCfgSmtLnk, oFila, lRequest, oJContent) class PLSBSWReqSmtLnk
+	Local oJHeader := NIL
+	Local oMsgJson := NIL
+	Local cJson := ''
+	Local cMsg := ''
+	Local oConfig      := nil
+
+	oConfig   := FWTFConfig()
+	oJHeader := JsonObject():New()
+
+	oJHeader["tenantId"] := oCfgSmtLnk:getIdTenant()
+	oJHeader["clientId"] := oCfgSmtLnk:getId()
+	oJHeader["secret"] := oCfgSmtLnk:getSecret()
+	oJHeader["type"] := oCfgSmtLnk:getType()
+	oJHeader["msgId"] := oConfig[ "msgId" ]
+
+	oMsgJson := JsonObject():new()
+	oMsgJson[ "header" ] := oJHeader
+	oMsgJson[ "content" ] := oJContent
+
+	cJson := oMsgJson:ToJson()
+	If !Empty( cJson )
+		self:lSuccess := oFila:Send( oJHeader["type"] + "/LinkProxy", cJson )
+	Endif
+
+	conout(IIf(Empty(cMsg),oFila:getError() , cMsg))
+
+Return self:lSuccess
+
+Method getUserLogin(msg) class PLSBSWReqSmtLnk
+    local cSql      := ""
+    local cSubstrOperatorSQL := iif(upper(TCGetDB()) $ "ORACLE|DB2|POSTGRES|INFORMIX", "SUBSTR", "SUBSTRING")
+    local nX        := 1
+    
+    cSql := " SELECT BSW_TPPOR,BSW_CODUSR,BSW_LOGUSR,BSW_EMAIL,BSW_NOMUSR,BSW_PERACE "
+	cSql += " FROM " + retsqlname("BSW")
+	cSql += " WHERE BSW_FILIAL = '" + xFilial("BSW") + "' "
+	cSql += " AND BSW_LOGUSR = '" + alltrim(cvaltochar(msg['login'])) + "'  "
+	cSql += " AND BSW_SENHA = '"  + alltrim(cvaltochar(msg['password'])) + "'  "
+	cSql += " AND D_E_L_E_T_ = ' ' "
+	dbUseArea(.T.,"TOPCONN",TcGenQry(,,cSql),"TrbBSW",.T.,.F.)
+    
+    self:oRespBody :=  jsonObject():new()
+    self:oRespBody["loginDetails"]  := jsonObject():new()
+    self:oRespBody["beneficiaries"] := {}
+    if !TrbBSW->(eof())
+        
+        self:oRespBody["loginDetails"]["code"]      := alltrim(TrbBSW->BSW_CODUSR)
+        self:oRespBody["loginDetails"]["username"]  := alltrim(TrbBSW->BSW_LOGUSR)
+        self:oRespBody["loginDetails"]["email"]     := alltrim(TrbBSW->BSW_EMAIL)
+        self:oRespBody["loginDetails"]["name"]      := alltrim(TrbBSW->BSW_NOMUSR)
+
+        if TrbBSW->BSW_TPPOR == '3'
+            cSql := " SELECT B49_BENEFI,BA1_NOMUSR "
+	        cSql += " FROM " + retsqlname("B49") + " B49 "
+            cSql += " INNER JOIN "+RetSqlName("BA1")+" BA1 "
+            cSql += "   ON BA1.BA1_FILIAL = '"+xFilial("BA1")+"' "
+            cSql += "  AND BA1.BA1_CODINT = "+cSubstrOperatorSQL+"(B49.B49_BENEFI, 1, 4) "
+            cSql += "  AND BA1.BA1_CODEMP = "+cSubstrOperatorSQL+"(B49.B49_BENEFI, 5, 4) "
+            cSql += "  AND BA1.BA1_MATRIC = "+cSubstrOperatorSQL+"(B49.B49_BENEFI, 9, 6) "
+            cSql += "  AND BA1.BA1_TIPREG = "+cSubstrOperatorSQL+"(B49.B49_BENEFI, 15, 2) "
+            cSql += "  AND BA1.BA1_DIGITO = "+cSubstrOperatorSQL+"(B49.B49_BENEFI, 17, 1) "
+            cSql += "  AND BA1.D_E_L_E_T_ = ' ' "
+	        cSql += " WHERE B49_FILIAL = '" + xFilial("B49") + "' "
+	        cSql += " AND B49_CODUSR = '" + alltrim(TrbBSW->BSW_CODUSR) + "'  " 
+	        cSql += " AND B49.D_E_L_E_T_ = ' ' "
+	        dbUseArea(.T.,"TOPCONN",TcGenQry(,,cSql),"TrbB49",.T.,.F.)
+	        while !TrbB49->(eof())
+	        	aadd(self:oRespBody["beneficiaries"], jsonObject():new())
+                self:oRespBody["beneficiaries"][nX]['subscriberId'] := alltrim(TrbB49->B49_BENEFI)
+                self:oRespBody["beneficiaries"][nX]['name']         := alltrim(TrbB49->BA1_NOMUSR)
+	        	TrbB49->(dbSkip())
+                nX++
+	        enddo
+            TrbB49->(dbCloseArea())
+        endif
+
+	    cSql := " SELECT AI8_CODMNU,AI8_TEXTO,AI8_CODPAI,AI8_ROTINA "
+	    cSql += " FROM " + retsqlname("AI8") + " AI8 "
+        if !empty(TrbBSW->BSW_PERACE)
+            cSql += " INNER JOIN "+RetSqlName("B7J")+" B7J "
+            cSql += "  ON  B7J_FILIAL = '"+xFilial("B7J")+"' "
+            cSql += "  AND B7J_CODPER = '"+TrbBSW->BSW_PERACE+"' "
+            cSql += "  AND B7J_CODMNU = AI8_CODMNU "
+            cSql += "  AND B7J.D_E_L_E_T_ = ' ' "
+        endif
+	    cSql += " WHERE AI8_FILIAL = '" + xFilial("AI8") + "' "
+	    cSql += " AND AI8_PORTAL = '000010'  " 
+	    cSql += " AND AI8.D_E_L_E_T_ = ' ' "
+	    dbUseArea(.T.,"TOPCONN",TcGenQry(,,cSql),"TrbAI8",.T.,.F.)
+        nX := 1
+        self:oRespBody["menus"] := {}
+	    while !TrbAI8->(eof())
+	    	aadd(self:oRespBody["menus"], jsonObject():new())
+            self:oRespBody["menus"][nX]['code']     := alltrim(TrbAI8->AI8_CODMNU)
+            self:oRespBody["menus"][nX]['name']     := alltrim(TrbAI8->AI8_TEXTO)
+            self:oRespBody["menus"][nX]['main']     := alltrim(TrbAI8->AI8_CODPAI)
+            self:oRespBody["menus"][nX]['module']   := alltrim(TrbAI8->AI8_ROTINA)
+	    	TrbAI8->(dbSkip())
+            nX++
+	    enddo
+        TrbAI8->(dbCloseArea())
+		
+        self:cResponse := self:oRespBody:toJson()
+    else
+        self:cFaultDetail   := "Login não encontrado"
+    endif
+    TrbBSW->(dbCloseArea())   
+
+    if !empty(self:cFaultDetail)
+        self:lSuccess       := .f.
+        self:nFault         := 400
+        self:cFaultDesc     := "Nenhum registro localizado"
+    endif
+Return 
+
+Method getResponse() class PLSBSWReqSmtLnk
+	Local oCfgSmtLnk := CfgSmtLnk():new()
+	Local oFilaResp := TotvsLinkClientCopy():New()
+	Local oMessage := nil
+    Local lHasMessage  := .F.
+    Local oConfig := nil
+
+	oConfig := FWTFConfig()
+	oCfgSmtLnk:setCfgRequest() 
+    oCfgSmtLnk:newTokenRac()
+
+    if lHasMessage := oFilaResp:Receive()
+        oMessage := oFilaResp:getMessage()
+	    oHeader := oMessage:header()
+	    oContent := oMessage:content()
+    
+        self:oRespBody["authorized"]  := jsonObject():new()
+        self:oRespBody["authorized"]  := oContent["authorized"]
+        self:cResponse := self:oRespBody:toJson()
+    endif
+
+Return
+
